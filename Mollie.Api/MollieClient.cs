@@ -31,6 +31,9 @@ using System.Net;
 using System.Text.RegularExpressions;
 using Mollie.Api.Models;
 using Newtonsoft.Json;
+using System.Diagnostics;
+using System.Threading.Tasks;
+using System.Threading;
 
 namespace Mollie.Api
 {
@@ -50,7 +53,9 @@ namespace Mollie.Api
 
         private string _last_request;
         private string _last_response;
-		
+
+        private static DateTime _lastResponseTimestamp = DateTime.MaxValue;
+
         /// <param name="api_key">The Mollie API key, starting with 'test_' or 'live_'</param>
         public void setApiKey(string api_key)
         {
@@ -62,7 +67,7 @@ namespace Mollie.Api
             }
 
             _api_key = api_key;
-        }		
+        }
 
         /// <summary>
         /// To integrate the iDeal issuer selection step on your own web site.
@@ -83,7 +88,7 @@ namespace Mollie.Api
         public PaymentStatus StartPayment(Payment payment)
         {
             string jsonData = LoadWebRequest("POST", "payments", JsonConvert.SerializeObject(payment, new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }));
-            PaymentStatus status = JsonConvert.DeserializeObject<PaymentStatus>(jsonData, new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore}); 
+            PaymentStatus status = JsonConvert.DeserializeObject<PaymentStatus>(jsonData, new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
             return status;
         }
 
@@ -109,7 +114,7 @@ namespace Mollie.Api
         {
             return Refund(id, 0);
         }
-		
+
         /// <summary>
         /// To refund a payment, you must have sufficient balance with Mollie for deducting the refund and its fees. You can find your current balance on the on the Mollie controlpanel.
         /// At the moment you can only process refunds for iDEAL, Bancontact/Mister Cash, SOFORT Banking, creditcard and bank transfer payments.
@@ -165,6 +170,60 @@ namespace Mollie.Api
             get { return _last_response; }
         }
 
+        /// <summary>
+        /// After a call has been done we have to make sure the Azure connections stays open.
+        /// </summary>
+        private void KeepConnectionOpen()
+        {
+            // Check if the calls that keep the connection open have to be done.
+            var keepConnectionOpen = ConfigurationManager.AppSettings["mollie_keep_connection_open"];
+            if (keepConnectionOpen == null || (Convert.ToBoolean(keepConnectionOpen) == false))
+                return;
+
+            // Wait one minute: this method is called as a task, so it does not block anything
+            Thread.Sleep(60 * 1000);
+
+            // Call the recurring calls
+            RecurringConnectionCalls();
+        }
+
+        /// <summary>
+        /// This method makes calls every minute to assure the connection at Azure servers stays open.
+        /// </summary>
+        private void RecurringConnectionCalls()
+        {
+            // Check how long it has been since the last Request and make a new call when it has been more then 60 seconds.
+            // The recursive process stops when the time difference is too small and this happens when there has been another request in between.
+            if ((DateTime.Now - _lastResponseTimestamp).TotalSeconds > 60)
+            {
+                // Make a web request
+                try
+                {
+                    // Make sure the method is called again one minute later: call it as a task
+                    _lastResponseTimestamp = DateTime.Now;
+                    Task task = new Task(new Action(KeepConnectionOpen));
+                    task.Start();
+
+                    // Make a request to the api endpoint: this one is only needed to keep the connection open.
+                    string url = API_ENDPOINT + "/" + API_VERSION + "/";
+                    HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+                    using (WebResponse response = request.GetResponse())
+                    {
+                        // Stream is to make sure the connection is opened.
+                        using (Stream stream = response.GetResponseStream())
+                        {
+                            if (stream != null) stream.Close();
+                        }
+                        response.Close();
+                    }
+                }
+                catch
+                {
+                    // Typical 404 errors here, they can be ignored
+                }
+            }
+        }
+
         private string LoadWebRequest(string httpMethod, string resource, string postData)
         {
             _last_request = postData;
@@ -184,7 +243,7 @@ namespace Mollie.Api
             request.Accept = "application/json";
             request.Headers.Add("Authorization", "Bearer " + _api_key);
             request.UserAgent = "Foxip Mollie Client v" + CLIENT_VERSION;
-            request.Timeout = 10*1000; // 10 x 1000ms = 10s
+            request.Timeout = 10 * 1000; // 10 x 1000ms = 10s
 
             // Some customers had security issues: http://stackoverflow.com/questions/2859790/the-request-was-aborted-could-not-create-ssl-tls-secure-channel
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls12;
@@ -208,6 +267,11 @@ namespace Mollie.Api
             {
                 using (WebResponse response = request.GetResponse())
                 {
+                    // Set the time stamp and call a new task: this keeps the connection open on Azure machines
+                    _lastResponseTimestamp = DateTime.Now;
+                    Task task = new Task(new Action(KeepConnectionOpen));
+                    task.Start();
+
                     using (Stream stream = response.GetResponseStream())
                     {
                         if (stream != null)
@@ -227,7 +291,7 @@ namespace Mollie.Api
             {
                 if (ex is WebException && ((WebException)ex).Status == WebExceptionStatus.ProtocolError)
                 {
-                    using (WebResponse errResp = ((WebException) ex).Response)
+                    using (WebResponse errResp = ((WebException)ex).Response)
                     {
                         using (Stream respStream = errResp.GetResponseStream())
                         {
