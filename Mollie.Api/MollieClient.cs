@@ -186,6 +186,9 @@ namespace Mollie.Api
             request.UserAgent = "Foxip Mollie Client v" + CLIENT_VERSION;
             request.Timeout = 10*1000; // 10 x 1000ms = 10s
 
+            // Some customers had security issues: http://stackoverflow.com/questions/2859790/the-request-was-aborted-could-not-create-ssl-tls-secure-channel
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls12;
+
             if (postData != "")
             {
                 //Send the request and get the response
